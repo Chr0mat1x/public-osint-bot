@@ -32,6 +32,9 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
+    BotCommand,
+    BotCommandScopeChat,
+    BotCommandScopeDefault,
     BufferedInputFile,
     BusinessConnection,
     BusinessMessagesDeleted,
@@ -61,6 +64,59 @@ log = logging.getLogger("osint-bot")
 
 router = Router()
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
+
+# Меню команд Telegram. Задаётся кодом при каждом старте, чтобы не расходиться
+# с реальными хэндлерами: раньше его выставляли вручную через API, и оно
+# устаревало при каждом изменении набора команд.
+PUBLIC_COMMANDS = [
+    ("start", "Справка и список возможностей"),
+    ("find", "Поиск публичного следа по username"),
+    ("evidence", "Доказательный пакет по домену/кошельку/организации"),
+    ("evidence_json", "Выгрузить пакет файлом JSON"),
+    ("watch", "Следить за организацией в реестрах"),
+    ("watches", "Мои наблюдения"),
+    ("unwatch", "Удалить наблюдение"),
+    ("mytrace", "Аудит своего публичного следа"),
+    ("breaches", "Каталог публичных утечек"),
+    ("bizstatus", "Архив чатов: подключение и статус"),
+    ("chats", "Чаты в архиве"),
+    ("deleted", "Что собеседники удалили"),
+    ("archive", "Выгрузить архив чатов в JSON"),
+    ("digest_now", "Недельная сводка по перепискам"),
+    ("limits", "Лимиты, кэш и настройки"),
+    ("history", "Последние запросы"),
+    ("delete_me", "Удалить все мои данные"),
+]
+
+# Служебное: видно только владельцу, в общем меню не показывается.
+OWNER_COMMANDS = PUBLIC_COMMANDS + [
+    ("setkey", "Сменить поисковый провайдер (владелец)"),
+]
+
+
+async def sync_command_menu(bot: Bot, owner_id: int | None = None) -> None:
+    """
+    Приводит меню команд в Telegram в соответствие с кодом.
+
+    Вызывается при старте: так после перезапуска не остаётся кнопок от
+    прежних версий бота.
+    """
+    public = [BotCommand(command=c, description=d) for c, d in PUBLIC_COMMANDS]
+    try:
+        await bot.set_my_commands(public, scope=BotCommandScopeDefault())
+    except Exception:  # noqa: BLE001 — меню не критично для работы бота
+        log.warning("Не удалось обновить меню команд", exc_info=True)
+        return
+
+    if owner_id is None:
+        return
+
+    owner = [BotCommand(command=c, description=d) for c, d in OWNER_COMMANDS]
+    try:
+        await bot.set_my_commands(owner, scope=BotCommandScopeChat(chat_id=owner_id))
+    except Exception:  # noqa: BLE001
+        log.warning("Не удалось обновить меню команд владельца", exc_info=True)
+
 
 # Заполняются в main() — так проще, чем таскать объекты через замыкания.
 storage: Storage
@@ -842,6 +898,13 @@ async def main() -> None:
             "есть" if app_cfg.github.token else "нет",
             len(app_cfg.network.proxy_list),
             f"каждые {app_cfg.monitor.interval_hours} ч" if app_cfg.monitor.enabled else "выключен",
+        )
+
+        # Меню команд приводим к текущему набору хэндлеров: после обновления
+        # кода у пользователей не должно остаться кнопок от прежних версий.
+        stored_owner = storage.setting_get("owner_id")
+        await sync_command_menu(
+            bot, owner_id=int(stored_owner) if stored_owner else None
         )
 
         # Business-режим требует включённого Secretary Mode в @BotFather:
