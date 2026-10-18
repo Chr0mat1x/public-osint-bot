@@ -247,10 +247,11 @@ def build_status(storage: Any, owner_user_id: int) -> str:
     if not conns:
         return (
             "🔌 <b>Business-логирование не подключено</b>\n\n"
-            "1. В @BotFather включите Business Mode:\n"
-            "   /mybots → бот → Bot Settings → Business Mode → Turn on\n"
+            "1. В @BotFather включите Secretary Mode (раньше назывался Business Mode):\n"
+            "   /mybots → бот → Bot Settings → Mode Settings → Secretary Mode → Turn on\n"
             "2. В Telegram: Настройки → Telegram Business → Чат-боты → выберите бота.\n"
-            "3. Разрешите боту видеть сообщения и удалять их.\n\n"
+            "3. Разрешите боту читать сообщения и удалять их.\n\n"
+            "Проверка: /bizstatus должен показать подключение с ID.\n"
             "После подключения бот начнёт вести архив открытых вами чатов."
         )
     lines = ["🔌 <b>Business-подключения</b>", ""]

@@ -83,7 +83,7 @@ class BusinessConfig:
     которые владелец аккаунта ему открыл. Данные каждого подключения
     остаются у владельца этого подключения.
 
-    Требует включённого Business Mode у бота в @BotFather.
+    Требует включённого Secretary Mode у бота в @BotFather.
     """
 
     enabled: bool = True
@@ -302,8 +302,8 @@ def run_setup_wizard(cfg: AppConfig, path: Path = CONFIG_PATH) -> AppConfig:
     cfg.business.enabled = biz in ("да", "yes", "y", "1", "true", "on")
     if cfg.business.enabled:
         print(
-            "  Не забудьте включить Business Mode у бота в @BotFather:\n"
-            "  /mybots → выберите бота → Bot Settings → Business Mode → Turn on."
+            "  Не забудьте включить Secretary Mode у бота в @BotFather:\n"
+            "  /mybots → выберите бота → Bot Settings → Mode Settings → Secretary Mode → Turn on."
         )
 
     cfg.save(path)

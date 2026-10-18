@@ -846,15 +846,15 @@ async def main() -> None:
             f"каждые {app_cfg.monitor.interval_hours} ч" if app_cfg.monitor.enabled else "выключен",
         )
 
-        # Business-режим требует включённого Business Mode в @BotFather:
+        # Business-режим требует включённого Secretary Mode в @BotFather:
         # без него Telegram не присылает business_* апдейты.
         if app_cfg.business.enabled:
             if getattr(me, "can_connect_to_business", False):
                 log.info("Business-архив чатов: включён")
             else:
                 log.warning(
-                    "Business-архив включён в конфиге, но у бота не активирован Business Mode. "
-                    "Включите: @BotFather → /mybots → бот → Bot Settings → Business Mode → Turn on. "
+                    "Business-архив включён в конфиге, но у бота не активирован Secretary Mode. "
+                    "Включите: @BotFather → /mybots → бот → Bot Settings → Mode Settings → Secretary Mode → Turn on. "
                     "До этого business_* апдейты приходить не будут."
                 )
 
