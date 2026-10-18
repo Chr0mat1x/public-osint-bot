@@ -214,7 +214,6 @@ async def cmd_limits(message: Message) -> None:
         f"Лимит находок на источник: {app_cfg.limits.max_results_per_source}\n"
         f"Наблюдений: {len(storage.watch_list(user_id))}/{app_cfg.monitor.max_watches_per_user}\n"
         f"Мониторинг: {'каждые ' + str(app_cfg.monitor.interval_hours) + ' ч' if app_cfg.monitor.enabled else 'выключен'}\n"
-        f"HIBP-ключ (проверка e-mail): {'есть' if app_cfg.hibp.api_key else 'нет'}\n"
         f"Business-логирование: {'включено' if app_cfg.business.enabled else 'выключено'}, "
         f"хранение {app_cfg.business.retention_days} дн.",
         link_preview_options=NO_PREVIEW,
@@ -495,7 +494,7 @@ async def cmd_mytrace(message: Message, command: CommandObject) -> None:
     """
     Аудит собственного публичного следа.
 
-    Работает по вашим данным: username, пароль, e-mail. Пароль проверяется
+    Работает по вашим данным: username и пароль. Пароль проверяется
     через k-anonymity и наружу не уходит.
     """
     raw = (command.args or "").strip()
@@ -511,9 +510,8 @@ async def cmd_mytrace(message: Message, command: CommandObject) -> None:
         )
         return
 
-    # Разбор аргументов: поддерживаем --pw <пароль> и --email <адрес>.
+    # Разбор аргументов: поддерживаем --pw <пароль>.
     password = ""
-    email = ""
     parts = raw.split()
     username_parts: list[str] = []
     index = 0
@@ -521,10 +519,6 @@ async def cmd_mytrace(message: Message, command: CommandObject) -> None:
         token = parts[index]
         if token == "--pw" and index + 1 < len(parts):
             password = parts[index + 1]
-            index += 2
-            continue
-        if token == "--email" and index + 1 < len(parts):
-            email = parts[index + 1]
             index += 2
             continue
         username_parts.append(token)
@@ -555,8 +549,6 @@ async def cmd_mytrace(message: Message, command: CommandObject) -> None:
             http_client,
             username=username,
             password=password,
-            email=email,
-            hibp_key=app_cfg.hibp.api_key,
             footprint_collector=collector,
         )
     except Exception as exc:  # noqa: BLE001
@@ -641,15 +633,21 @@ async def on_business_connection(connection: BusinessConnection, bot: Bot) -> No
     state = "подключено" if connection.is_enabled else "отключено"
     log.info("Business-подключение %s: %s (владелец %s)", connection.id, state, owner_id)
     if connection.is_enabled:
-        try:
-            await bot.send_message(
-                owner_id,
-                "🔌 <b>Business-логирование подключено</b>\n\n"
-                "Бот ведёт архив открытых вами чатов и сообщит, если собеседник "
-                "удалит сообщение.\n\n"
-                "Команды: /bizstatus, /chats, /deleted, /archive",
-                link_preview_options=NO_PREVIEW,
+        _, warnings = bizlog_module.rights_summary(connection)
+        text = (
+            "🔌 <b>Business-логирование подключено</b>\n\n"
+            "Бот ведёт архив открытых вами чатов и сообщит, если собеседник "
+            "удалит сообщение.\n\n"
+            "Команды: /bizstatus, /chats, /deleted, /archive"
+        )
+        if warnings:
+            text += "\n\n⚠️ <b>Не хватает прав</b>\n" + "\n".join(f"• {w}" for w in warnings)
+            text += (
+                "\n\nВыдать: Настройки → Telegram Business → Чат-боты → ваш бот → "
+                "Разрешения, затем переподключить."
             )
+        try:
+            await bot.send_message(owner_id, text, link_preview_options=NO_PREVIEW)
         except Exception:  # noqa: BLE001 — приветствие не критично
             log.warning("Не удалось отправить приветствие Business", exc_info=True)
 

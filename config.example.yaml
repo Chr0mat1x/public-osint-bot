@@ -20,12 +20,6 @@ github:
   # но с токеном лимиты выше (30 запросов/мин на поиск вместо 10).
   token: ""
 
-hibp:
-  # Опционально. Ключ haveibeenpwned.com API для проверки e-mail в утечках.
-  # Проверка ПАРОЛЕЙ работает без ключа через k-anonymity (/mytrace --pw).
-  # Без ключа бот честно скажет, что для e-mail нужен ключ.
-  api_key: ""
-
 monitor:
   # Фоновый мониторинг публичных реестров (GLEIF, SEC EDGAR, OFAC SDN, Wikidata).
   enabled: true

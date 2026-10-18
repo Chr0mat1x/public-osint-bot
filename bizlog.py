@@ -144,13 +144,52 @@ def register_connection(storage: Any, connection: Any) -> int:
     присылает тот же апдейт с is_enabled=False.
     """
     owner_id = int(connection.user.id)
+    state, _ = rights_summary(connection)
     storage.biz_connection_upsert(
         connection_id=str(connection.id),
         owner_user_id=owner_id,
         user_chat_id=int(connection.user_chat_id) if connection.user_chat_id else None,
         is_enabled=bool(connection.is_enabled),
+        rights=state,
     )
     return owner_id
+
+
+def rights_summary(connection: Any) -> tuple[str, list[str]]:
+    """
+    Возвращает (состояние, список предупреждений) по правам подключения.
+
+    Для архива обязательно только право читать сообщения: без него Telegram
+    не пришлёт business_message и архив останется пустым. Права отвечать и
+    удалять нужны лишь для действий от имени владельца.
+    """
+    rights = getattr(connection, "rights", None)
+    if rights is None:
+        return "не переданы Telegram", ["Права ещё не пришли: переподключите бота в настройках."]
+
+    can_read = getattr(rights, "can_read_messages", None)
+    can_delete = getattr(rights, "can_delete_all_messages", None) or getattr(
+        rights, "can_delete_sent_messages", None
+    )
+    can_reply = getattr(rights, "can_reply", None)
+
+    warnings: list[str] = []
+    if not can_read:
+        warnings.append(
+            "Нет права «читать сообщения» — это обязательное право, без него архив будет пустым."
+        )
+
+    granted = [
+        label
+        for label, value in (
+            ("чтение", can_read),
+            ("ответы", can_reply),
+            ("удаление", can_delete),
+        )
+        if value
+    ]
+    state = ", ".join(granted) if granted else "ни одного права"
+    return state, warnings
 
 
 def store_message(storage: Any, connection_id: str, message: Any, owner_user_id: int) -> None:
@@ -263,6 +302,20 @@ def build_status(storage: Any, owner_user_id: int) -> str:
             f"• <code>{_esc(cid)}</code> — {state}\n"
             f"  чатов: {stats['chats']}, сообщений: {stats['total']}, удалённых: {stats['deleted']}"
         )
+        rights = (row["rights"] or "").strip()
+        if rights:
+            lines.append(f"  права: {_esc(rights)}")
+        if not row["is_enabled"]:
+            lines.append(
+                "  ⚠️ Подключение отключено. Включите бота заново: "
+                "Настройки → Telegram Business → Чат-боты."
+            )
+        elif rights and "чтение" not in rights:
+            lines.append(
+                "  ⚠️ Нет права читать сообщения — архив останется пустым. "
+                "Выдайте: Настройки → Telegram Business → Чат-боты → ваш бот → Разрешения, "
+                "затем переподключите бота."
+            )
     return "\n".join(lines)
 
 

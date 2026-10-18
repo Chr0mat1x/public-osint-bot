@@ -39,8 +39,6 @@ class SelfTraceResult:
     password_checked: bool = False
     password_occurrences: int = 0
     password_error: Optional[str] = None
-    email: str = ""
-    email_finding: Optional[Finding] = None
     breaches: List[Finding] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
 
@@ -58,14 +56,6 @@ async def check_password(http: HttpClient, password: str, result: SelfTraceResul
         result.password_occurrences = int(finding.extra.get("occurrences") or 0)
     except HttpError as exc:
         result.password_error = str(exc)
-
-
-async def check_email(http: HttpClient, email: str, api_key: str, result: SelfTraceResult) -> None:
-    """Проверяет e-mail по HIBP (нужен ключ) и сохраняет результат."""
-    try:
-        result.email_finding = await breach_public.email_exposure(http, email, api_key=api_key)
-    except HttpError as exc:
-        result.notes.append(f"Проверка e-mail: {exc}")
 
 
 async def load_catalog(http: HttpClient, result: SelfTraceResult, keyword: str = "") -> None:
@@ -126,18 +116,7 @@ def build_selftrace_report(result: SelfTraceResult) -> str:
     lines.append("<i>Пароль не передавался: отправлены только 5 символов SHA-1 хеша (k-anonymity).</i>")
     lines.append("")
 
-    # 3. E-mail.
-    if result.email or result.email_finding:
-        lines.append("📧 <b>Проверка e-mail</b>")
-        lines.append("")
-        if result.email_finding:
-            lines.append(f"• {_esc(result.email_finding.title)}")
-            lines.append(f"  {_esc(_short(result.email_finding.snippet))}")
-        else:
-            lines.append("Проверка не выполнена.")
-        lines.append("")
-
-    # 4. Каталог утечек.
+    # 3. Каталог утечек.
     if result.breaches:
         lines.append("🗂 <b>Крупные публичные утечки</b>")
         lines.append("")
@@ -171,8 +150,6 @@ async def run_selftrace(
     http: HttpClient,
     username: str,
     password: str = "",
-    email: str = "",
-    hibp_key: str = "",
     footprint_collector=None,
 ) -> SelfTraceResult:
     """
@@ -181,13 +158,11 @@ async def run_selftrace(
     footprint_collector — функция поиска публичного следа; передаётся из bot.py,
     чтобы не дублировать логику обычного поиска.
     """
-    result = SelfTraceResult(username=username, email=email)
+    result = SelfTraceResult(username=username)
 
     tasks = []
     if password:
         tasks.append(check_password(http, password, result))
-    if email:
-        tasks.append(check_email(http, email, hibp_key, result))
     tasks.append(load_catalog(http, result))
 
     if footprint_collector is not None and username:

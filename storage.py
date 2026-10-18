@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS business_connections (
     owner_user_id INTEGER NOT NULL,
     user_chat_id  INTEGER,
     is_enabled    INTEGER NOT NULL DEFAULT 1,
+    rights        TEXT    NOT NULL DEFAULT '',
     connected_at  REAL    NOT NULL,
     updated_at    REAL    NOT NULL
 );
@@ -135,7 +136,24 @@ class Storage:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """
+        Догоняет схему существующих баз.
+
+        CREATE TABLE IF NOT EXISTS не добавляет колонки в уже созданную таблицу,
+        поэтому новые поля нужно докатывать отдельно.
+        """
+        existing = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(business_connections)")
+        }
+        if existing and "rights" not in existing:
+            self.conn.execute(
+                "ALTER TABLE business_connections ADD COLUMN rights TEXT NOT NULL DEFAULT ''"
+            )
 
     def close(self) -> None:
         try:
@@ -410,20 +428,22 @@ class Storage:
         owner_user_id: int,
         user_chat_id: Optional[int],
         is_enabled: bool,
+        rights: str = "",
     ) -> None:
         now = time.time()
         self.conn.execute(
             """
             INSERT INTO business_connections
-                (connection_id, owner_user_id, user_chat_id, is_enabled, connected_at, updated_at)
-            VALUES(?, ?, ?, ?, ?, ?)
+                (connection_id, owner_user_id, user_chat_id, is_enabled, rights, connected_at, updated_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(connection_id) DO UPDATE SET
                 owner_user_id = excluded.owner_user_id,
                 user_chat_id  = excluded.user_chat_id,
                 is_enabled    = excluded.is_enabled,
+                rights        = excluded.rights,
                 updated_at    = excluded.updated_at
             """,
-            (connection_id, owner_user_id, user_chat_id, int(is_enabled), now, now),
+            (connection_id, owner_user_id, user_chat_id, int(is_enabled), rights, now, now),
         )
         self.conn.commit()
 
@@ -452,7 +472,7 @@ class Storage:
     def biz_connections_for(self, owner_user_id: int) -> List[sqlite3.Row]:
         return list(
             self.conn.execute(
-                "SELECT connection_id, user_chat_id, is_enabled, connected_at "
+                "SELECT connection_id, user_chat_id, is_enabled, rights, connected_at "
                 "FROM business_connections WHERE owner_user_id = ? ORDER BY connected_at DESC",
                 (owner_user_id,),
             ).fetchall()

@@ -1,5 +1,5 @@
 """
-sources/breach_public.py — проверка собственных данных в известных утечках.
+sources/breach_public.py — проверка собственного пароля в известных утечках.
 
 Используется ТОЛЬКО в режиме самопроверки (/mytrace) и только по данным,
 которые пользователь ввёл как свои.
@@ -9,12 +9,11 @@ sources/breach_public.py — проверка собственных данны�
   * Пароли проверяются через HIBP Password k-anonymity API: клиент отправляет
     первые 5 символов SHA-1 хеша, сервер возвращает список суффиксов. Полный
     хеш и сам пароль наружу не уходят НИКОГДА.
-  * E-mail проверяется через HIBP Breached Account API. Этот endpoint требует
-    платный ключ; без ключа показываем каталог утечек (публичный, без ключа)
-    и объясняем, как проверить себя.
-
 Модуль НЕ отдаёт содержимое утечек: только факт «этот пароль встречался
 в утечке N раз» и ссылку на смену пароля.
+
+Поиска по e-mail здесь намеренно нет: это запрос личного идентификатора к базе
+слитых данных, то есть деанонимизация, а не проверка собственного следа.
 """
 
 from __future__ import annotations
@@ -24,13 +23,12 @@ from typing import Any, Dict, List
 
 from normalizer import Finding
 
-from .http_client import HttpClient, HttpError
+from .http_client import HttpClient
 
 UA = "osint-bot/1.0 (self-check)"
 
 HIBP_RANGE = "https://api.pwnedpasswords.com/range/{prefix}"
 HIBP_BREACHES = "https://haveibeenpwned.com/api/v3/breaches"
-HIBP_ACCOUNT = "https://haveibeenpwned.com/api/v3/breachedaccount/{account}"
 
 
 async def password_exposure(http: HttpClient, password: str) -> Finding:
@@ -112,51 +110,3 @@ async def breach_catalog(http: HttpClient, keyword: str = "") -> List[Finding]:
             break
 
     return findings
-
-
-async def email_exposure(http: HttpClient, email: str, api_key: str = "") -> Finding:
-    """
-    Проверяет e-mail по HIBP Breached Account API.
-
-    Без ключа API отвечает 401 — в этом случае честно сообщаем, что нужен
-    ключ, и не притворяемся, что «утечек нет».
-    """
-    if not api_key:
-        return Finding(
-            source="breach_public",
-            kind="email_check",
-            url="https://haveibeenpwned.com/",
-            title="Проверка e-mail требует ключа HIBP",
-            snippet=(
-                "Для проверки конкретного e-mail нужен платный ключ HIBP "
-                "(hibp-api-key). Пароли проверяются без ключа — командой /mytrace."
-            ),
-            extra={"registry": "HIBP", "needs_key": True},
-        )
-
-    try:
-        data = await http.get_json(
-            HIBP_ACCOUNT.format(account=email),
-            headers={"User-Agent": UA, "hibp-api-key": api_key},
-        )
-    except HttpError as exc:
-        if exc.status == 404:
-            return Finding(
-                source="breach_public",
-                kind="email_check",
-                url="https://haveibeenpwned.com/",
-                title="E-mail в утечках не найден",
-                snippet="Этот адрес не встречается в известных публичных утечках HIBP.",
-                extra={"registry": "HIBP", "breaches": 0},
-            )
-        raise
-
-    names = [str(b.get("Name") or "") for b in (data or [])]
-    return Finding(
-        source="breach_public",
-        kind="email_check",
-        url="https://haveibeenpwned.com/",
-        title=f"E-mail найден в утечках: {len(names)}",
-        snippet="Утечки: " + ", ".join(names[:10]) + ". Смените пароли на этих сервисах.",
-        extra={"registry": "HIBP", "breaches": len(names), "names": names[:10]},
-    )

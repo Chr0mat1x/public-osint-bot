@@ -53,18 +53,6 @@ class GithubConfig:
 
 
 @dataclass
-class HibpConfig:
-    """
-    Ключ для проверки e-mail в утечках (haveibeenpwned.com API).
-
-    Необязателен: проверка паролей работает без ключа через k-anonymity.
-    Без ключа команда /mytrace честно сообщает, что для e-mail нужен ключ.
-    """
-
-    api_key: str = ""
-
-
-@dataclass
 class MonitorConfig:
     """Фоновый мониторинг публичных реестров."""
 
@@ -119,7 +107,6 @@ class AppConfig:
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     github: GithubConfig = field(default_factory=GithubConfig)
-    hibp: HibpConfig = field(default_factory=HibpConfig)
     monitor: MonitorConfig = field(default_factory=MonitorConfig)
     business: BusinessConfig = field(default_factory=BusinessConfig)
     network: NetworkConfig = field(default_factory=NetworkConfig)
@@ -165,7 +152,6 @@ def load_config(path: Path = CONFIG_PATH) -> AppConfig:
     tg = _section(raw, "telegram")
     srch = _section(raw, "search")
     gh = _section(raw, "github")
-    hibp = _section(raw, "hibp")
     mon = _section(raw, "monitor")
     biz = _section(raw, "business")
     net = _section(raw, "network")
@@ -179,7 +165,6 @@ def load_config(path: Path = CONFIG_PATH) -> AppConfig:
             api_key=str(srch.get("api_key") or ""),
         ),
         github=GithubConfig(token=str(gh.get("token") or "")),
-        hibp=HibpConfig(api_key=str(hibp.get("api_key") or "")),
         monitor=MonitorConfig(
             enabled=bool(mon.get("enabled", True)),
             interval_hours=int(mon.get("interval_hours") or 6),
@@ -211,7 +196,6 @@ def load_config(path: Path = CONFIG_PATH) -> AppConfig:
     cfg.telegram.bot_token = os.getenv("BOT_TOKEN") or cfg.telegram.bot_token
     cfg.search.api_key = os.getenv("SEARCH_API_KEY") or cfg.search.api_key
     cfg.github.token = os.getenv("GITHUB_TOKEN") or cfg.github.token
-    cfg.hibp.api_key = os.getenv("HIBP_API_KEY") or cfg.hibp.api_key
     env_proxies = os.getenv("PROXY_LIST")
     if env_proxies:
         cfg.network.proxy_list = [p.strip() for p in env_proxies.split(",") if p.strip()]
@@ -282,12 +266,6 @@ def run_setup_wizard(cfg: AppConfig, path: Path = CONFIG_PATH) -> AppConfig:
 
     gh = _ask("GITHUB_TOKEN (опционально, Enter — пропустить)", cfg.github.token)
     cfg.github.token = gh
-
-    hibp = _ask(
-        "HIBP_API_KEY (опционально, для проверки e-mail в утечках, Enter — пропустить)",
-        cfg.hibp.api_key,
-    )
-    cfg.hibp.api_key = hibp
 
     proxies = _ask(
         "PROXY_LIST (опционально, через запятую, Enter — пропустить)",
