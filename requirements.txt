@@ -1,0 +1,9 @@
+# --- Telegram ---
+aiogram>=3.13,<4
+
+# --- HTTP ---
+# speedups добавляет нормальную поддержку HTTPS-прокси (CONNECT) и ускоряет парсинг
+aiohttp[speedups]>=3.10
+
+# --- Конфигурация ---
+PyYAML>=6.0.1

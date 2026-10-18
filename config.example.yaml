@@ -1,0 +1,49 @@
+# Пример конфигурации. Скопируйте в config.yaml:  cp config.example.yaml config.yaml
+# При первом запуске `python bot.py` мастер сам создаст config.yaml и спросит ключи.
+# config.yaml содержит секреты и НЕ должен попадать в git (см. .gitignore).
+
+telegram:
+  # Токен от @BotFather. Обязателен.
+  bot_token: ""
+
+search:
+  # auto       — без ключа: DuckDuckGo, при анти-бот челлендже фолбэк на Bing HTML (рекомендуется)
+  # duckduckgo — только публичная HTML-выдача DuckDuckGo (без ключа)
+  # bing_html  — только публичная HTML-выдача Bing (без ключа)
+  # serpapi    — официальный API SerpAPI, нужен SEARCH_API_KEY
+  # bing       — Azure Bing Web Search API, нужен SEARCH_API_KEY
+  provider: "auto"
+  api_key: ""
+
+github:
+  # Опционально. Публичный GitHub API работает и без токена,
+  # но с токеном лимиты выше (30 запросов/мин на поиск вместо 10).
+  token: ""
+
+hibp:
+  # Опционально. Ключ haveibeenpwned.com API для проверки e-mail в утечках.
+  # Проверка ПАРОЛЕЙ работает без ключа через k-anonymity (/mytrace --pw).
+  # Без ключа бот честно скажет, что для e-mail нужен ключ.
+  api_key: ""
+
+monitor:
+  # Фоновый мониторинг публичных реестров (GLEIF, SEC EDGAR, OFAC SDN, Wikidata).
+  enabled: true
+  interval_hours: 6          # как часто обходить наблюдения
+  max_watches_per_user: 10   # сколько наблюдений может держать один пользователь
+
+network:
+  # Опционально: список прокси, "http://user:pass@host:port" или "socks5://host:port"
+  # (для socks5 нужен aiohttp-socks, см. README)
+  proxy_list: []
+  request_timeout: 12      # таймаут одного HTTP-запроса, сек
+  source_timeout: 25       # таймаут источника целиком, сек
+  max_concurrency: 8       # сколько источников опрашивать параллельно
+
+limits:
+  daily_requests_per_user: 10   # rate-limit на пользователя Telegram
+  cache_ttl_hours: 24           # время жизни кэша в SQLite
+  max_results_per_source: 20    # ограничение выдачи одного источника
+
+storage:
+  db_path: "data/osint.sqlite3"

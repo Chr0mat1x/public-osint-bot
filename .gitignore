@@ -1,0 +1,11 @@
+# секреты
+config.yaml
+
+# локальная БД с историей запросов
+data/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
