@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from functools import partial
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -30,8 +31,15 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.filters import Command, CommandObject
-from aiogram.types import BufferedInputFile, LinkPreviewOptions, Message
+from aiogram.types import (
+    BufferedInputFile,
+    BusinessConnection,
+    BusinessMessagesDeleted,
+    LinkPreviewOptions,
+    Message,
+)
 
+import bizlog as bizlog_module
 import config as config_module
 import evidence as evidence_module
 import monitor as monitor_module
@@ -206,7 +214,9 @@ async def cmd_limits(message: Message) -> None:
         f"Лимит находок на источник: {app_cfg.limits.max_results_per_source}\n"
         f"Наблюдений: {len(storage.watch_list(user_id))}/{app_cfg.monitor.max_watches_per_user}\n"
         f"Мониторинг: {'каждые ' + str(app_cfg.monitor.interval_hours) + ' ч' if app_cfg.monitor.enabled else 'выключен'}\n"
-        f"HIBP-ключ (проверка e-mail): {'есть' if app_cfg.hibp.api_key else 'нет'}",
+        f"HIBP-ключ (проверка e-mail): {'есть' if app_cfg.hibp.api_key else 'нет'}\n"
+        f"Business-логирование: {'включено' if app_cfg.business.enabled else 'выключено'}, "
+        f"хранение {app_cfg.business.retention_days} дн.",
         link_preview_options=NO_PREVIEW,
     )
 
@@ -235,7 +245,10 @@ async def cmd_delete_me(message: Message) -> None:
         f"Счётчиков лимита: {stats['usage']}\n"
         f"Записей кэша: {stats['cache']}\n"
         f"Наблюдений: {stats.get('watches', 0)}\n"
-        f"Снимков наблюдений: {stats.get('snapshots', 0)}\n\n"
+        f"Снимков наблюдений: {stats.get('snapshots', 0)}\n"
+        f"Business-подключений: {stats.get('biz_connections', 0)}\n"
+        f"Сообщений архива: {stats.get('biz_messages', 0)}\n"
+        f"Чатов архива: {stats.get('biz_chats', 0)}\n\n"
         "Кэш чужих запросов не затрагивается — удаляются только ваши данные.",
         link_preview_options=NO_PREVIEW,
     )
@@ -616,6 +629,174 @@ async def on_text(message: Message) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Telegram Business: логирование личных чатов
+#
+# Бот получает апдейты только по тем чатам, которые владелец аккаунта открыл
+# ему сам (Настройки → Telegram Business → Чат-боты). Данные привязаны к
+# connection_id, уведомления и архив уходят только владельцу подключения.
+# --------------------------------------------------------------------------- #
+@router.business_connection()
+async def on_business_connection(connection: BusinessConnection, bot: Bot) -> None:
+    owner_id = bizlog_module.register_connection(storage, connection)
+    state = "подключено" if connection.is_enabled else "отключено"
+    log.info("Business-подключение %s: %s (владелец %s)", connection.id, state, owner_id)
+    if connection.is_enabled:
+        try:
+            await bot.send_message(
+                owner_id,
+                "🔌 <b>Business-логирование подключено</b>\n\n"
+                "Бот ведёт архив открытых вами чатов и сообщит, если собеседник "
+                "удалит сообщение.\n\n"
+                "Команды: /bizstatus, /chats, /deleted, /archive",
+                link_preview_options=NO_PREVIEW,
+            )
+        except Exception:  # noqa: BLE001 — приветствие не критично
+            log.warning("Не удалось отправить приветствие Business", exc_info=True)
+
+
+@router.business_message()
+async def on_business_message(message: Message) -> None:
+    conn_id = message.business_connection_id
+    if not conn_id:
+        return
+    owner_id = storage.biz_connection_owner(conn_id)
+    if owner_id is None:
+        # Подключение ещё не зарегистрировано — пропускаем, чтобы не писать
+        # сообщения в никуда.
+        return
+    try:
+        bizlog_module.store_message(storage, conn_id, message, owner_id)
+    except Exception:  # noqa: BLE001 — сбой архивации не должен ронять polling
+        log.warning("Не удалось сохранить business-сообщение", exc_info=True)
+
+
+@router.edited_business_message()
+async def on_edited_business_message(message: Message) -> None:
+    conn_id = message.business_connection_id
+    if not conn_id:
+        return
+    owner_id = storage.biz_connection_owner(conn_id)
+    if owner_id is None:
+        return
+    try:
+        bizlog_module.store_message(storage, conn_id, message, owner_id)
+    except Exception:  # noqa: BLE001
+        log.warning("Не удалось обновить business-сообщение", exc_info=True)
+
+
+@router.deleted_business_messages()
+async def on_deleted_business_messages(event: BusinessMessagesDeleted, bot: Bot) -> None:
+    conn_id = str(event.business_connection_id)
+    owner_id = storage.biz_connection_owner(conn_id)
+    if owner_id is None:
+        return
+    try:
+        rows = bizlog_module.mark_deleted(storage, event)
+    except Exception:  # noqa: BLE001
+        log.warning("Не удалось отметить удаление", exc_info=True)
+        return
+
+    if not rows or not app_cfg.business.notify_deletions:
+        return
+
+    title = bizlog_module.chat_title(event.chat)
+    text = bizlog_module.build_deleted_report(title, rows)
+    try:
+        for chunk in report_module.split_message(text):
+            await bot.send_message(owner_id, chunk)
+    except Exception:  # noqa: BLE001 — уведомление не критично для архива
+        log.warning("Не удалось отправить уведомление об удалении", exc_info=True)
+
+
+@router.message(Command("bizstatus"))
+async def cmd_bizstatus(message: Message) -> None:
+    await message.answer(
+        bizlog_module.build_status(storage, message.from_user.id),
+        link_preview_options=NO_PREVIEW,
+    )
+
+
+@router.message(Command("chats"))
+async def cmd_chats(message: Message) -> None:
+    conns = storage.biz_connections_for(message.from_user.id)
+    if not conns:
+        await message.answer(
+            "Business-логирование не подключено. Подробности: /bizstatus",
+            link_preview_options=NO_PREVIEW,
+        )
+        return
+    parts = []
+    for row in conns:
+        parts.append(bizlog_module.build_chat_list(storage.biz_chat_list(str(row["connection_id"]))))
+    await send_long(message, "\n\n".join(parts))
+
+
+@router.message(Command("deleted"))
+async def cmd_deleted(message: Message) -> None:
+    conns = storage.biz_connections_for(message.from_user.id)
+    if not conns:
+        await message.answer(
+            "Business-логирование не подключено. Подробности: /bizstatus",
+            link_preview_options=NO_PREVIEW,
+        )
+        return
+
+    blocks = []
+    for conn in conns:
+        conn_id = str(conn["connection_id"])
+        titles = {int(r["chat_id"]): (r["title"] or str(r["chat_id"])) for r in storage.biz_chat_list(conn_id)}
+        rows = storage.biz_deleted_since(conn_id, 0.0)
+        rows = list(reversed(rows))[:20]
+        blocks.append(bizlog_module.build_deleted_list(rows, titles))
+    await send_long(message, "\n\n".join(blocks))
+
+
+@router.message(Command("archive"))
+async def cmd_archive(message: Message) -> None:
+    conns = storage.biz_connections_for(message.from_user.id)
+    if not conns:
+        await message.answer(
+            "Business-логирование не подключено. Подробности: /bizstatus",
+            link_preview_options=NO_PREVIEW,
+        )
+        return
+
+    conn_id = str(conns[0]["connection_id"])
+    stats = storage.biz_stats(conn_id)
+    if stats["total"] == 0:
+        await message.answer("Архив пуст — пока нечего выгружать.", link_preview_options=NO_PREVIEW)
+        return
+
+    payload = bizlog_module.build_archive_json(storage, conn_id)
+    stamp = time.strftime("%Y%m%d-%H%M", time.gmtime())
+    await message.answer_document(
+        BufferedInputFile(payload, filename=f"archive-{stamp}.json"),
+        caption=(
+            f"📦 Архив: {stats['total']} сообщений в {stats['chats']} чатах, "
+            f"из них удалённых — {stats['deleted']}."
+        ),
+    )
+
+
+@router.message(Command("digest_now"))
+async def cmd_digest_now(message: Message) -> None:
+    conns = storage.biz_connections_for(message.from_user.id)
+    if not conns:
+        await message.answer(
+            "Business-логирование не подключено. Подробности: /bizstatus",
+            link_preview_options=NO_PREVIEW,
+        )
+        return
+
+    since, until = bizlog_module.digest_window()
+    blocks = [
+        bizlog_module.build_digest(storage, str(row["connection_id"]), since, until)
+        for row in conns
+    ]
+    await send_long(message, "\n\n".join(blocks))
+
+
+# --------------------------------------------------------------------------- #
 # Запуск
 # --------------------------------------------------------------------------- #
 async def main() -> None:
@@ -665,6 +846,18 @@ async def main() -> None:
             f"каждые {app_cfg.monitor.interval_hours} ч" if app_cfg.monitor.enabled else "выключен",
         )
 
+        # Business-режим требует включённого Business Mode в @BotFather:
+        # без него Telegram не присылает business_* апдейты.
+        if app_cfg.business.enabled:
+            if getattr(me, "can_connect_to_business", False):
+                log.info("Business-архив чатов: включён")
+            else:
+                log.warning(
+                    "Business-архив включён в конфиге, но у бота не активирован Business Mode. "
+                    "Включите: @BotFather → /mybots → бот → Bot Settings → Business Mode → Turn on. "
+                    "До этого business_* апдейты приходить не будут."
+                )
+
         # Фоновый обход наблюдений: отдельная задача, не блокирует polling.
         monitor_task: asyncio.Task | None = None
         if app_cfg.monitor.enabled:
@@ -677,18 +870,30 @@ async def main() -> None:
                 )
             )
 
+        # Business-логирование: недельные сводки и очистка архива по сроку.
+        biz_task: asyncio.Task | None = None
+        if app_cfg.business.enabled:
+            biz_task = asyncio.create_task(bizlog_module.digest_loop(storage, bot, app_cfg))
+
         try:
             # drop_pending_updates: не отвечаем на запросы, накопившиеся пока бот лежал.
-            await dp.start_polling(bot, drop_pending_updates=True)
+            # allowed_updates: business_* апдейты приходят только при явной подписке.
+            await dp.start_polling(
+                bot,
+                drop_pending_updates=True,
+                allowed_updates=dp.resolve_used_update_types(),
+            )
         finally:
-            if monitor_task is not None:
-                monitor_task.cancel()
+            for task in (monitor_task, biz_task):
+                if task is None:
+                    continue
+                task.cancel()
                 try:
-                    await monitor_task
+                    await task
                 except asyncio.CancelledError:
                     pass
                 except Exception:  # noqa: BLE001 — падение фоновой задачи не должно мешать выходу
-                    log.warning("Мониторинг завершился с ошибкой", exc_info=True)
+                    log.warning("Фоновая задача завершилась с ошибкой", exc_info=True)
     finally:
         await http_client.close()
         storage.close()

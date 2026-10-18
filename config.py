@@ -74,6 +74,27 @@ class MonitorConfig:
 
 
 @dataclass
+class BusinessConfig:
+    """
+    Логирование личных чатов через Telegram Business.
+
+    Пользователь сам подключает бота к своему аккаунту
+    (Настройки → Telegram Business → Чат-боты). Бот видит только те чаты,
+    которые владелец аккаунта ему открыл. Данные каждого подключения
+    остаются у владельца этого подключения.
+
+    Требует включённого Business Mode у бота в @BotFather.
+    """
+
+    enabled: bool = True
+    notify_deletions: bool = True
+    digest_enabled: bool = True
+    digest_weekday: int = 6  # 0=Пн … 6=Вс; по умолчанию воскресенье
+    digest_hour_utc: int = 20
+    retention_days: int = 30
+
+
+@dataclass
 class NetworkConfig:
     proxy_list: List[str] = field(default_factory=list)
     request_timeout: float = 12.0
@@ -100,6 +121,7 @@ class AppConfig:
     github: GithubConfig = field(default_factory=GithubConfig)
     hibp: HibpConfig = field(default_factory=HibpConfig)
     monitor: MonitorConfig = field(default_factory=MonitorConfig)
+    business: BusinessConfig = field(default_factory=BusinessConfig)
     network: NetworkConfig = field(default_factory=NetworkConfig)
     limits: LimitsConfig = field(default_factory=LimitsConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
@@ -145,6 +167,7 @@ def load_config(path: Path = CONFIG_PATH) -> AppConfig:
     gh = _section(raw, "github")
     hibp = _section(raw, "hibp")
     mon = _section(raw, "monitor")
+    biz = _section(raw, "business")
     net = _section(raw, "network")
     lim = _section(raw, "limits")
     sto = _section(raw, "storage")
@@ -161,6 +184,14 @@ def load_config(path: Path = CONFIG_PATH) -> AppConfig:
             enabled=bool(mon.get("enabled", True)),
             interval_hours=int(mon.get("interval_hours") or 6),
             max_watches_per_user=int(mon.get("max_watches_per_user") or 10),
+        ),
+        business=BusinessConfig(
+            enabled=bool(biz.get("enabled", True)),
+            notify_deletions=bool(biz.get("notify_deletions", True)),
+            digest_enabled=bool(biz.get("digest_enabled", True)),
+            digest_weekday=int(biz.get("digest_weekday", 6)),
+            digest_hour_utc=int(biz.get("digest_hour_utc", 20)),
+            retention_days=int(biz.get("retention_days") or 30),
         ),
         network=NetworkConfig(
             proxy_list=list(net.get("proxy_list") or []),
@@ -185,6 +216,10 @@ def load_config(path: Path = CONFIG_PATH) -> AppConfig:
     if env_proxies:
         cfg.network.proxy_list = [p.strip() for p in env_proxies.split(",") if p.strip()]
 
+    env_biz = os.getenv("BUSINESS_ENABLED")
+    if env_biz is not None and env_biz.strip():
+        cfg.business.enabled = env_biz.strip().lower() in ("1", "true", "yes", "on")
+
     return cfg
 
 
@@ -202,6 +237,12 @@ def validate_config(cfg: AppConfig) -> List[str]:
         problems.append(f"Для провайдера '{cfg.search.provider}' нужен search.api_key.")
     if cfg.limits.daily_requests_per_user < 1:
         problems.append("limits.daily_requests_per_user должен быть >= 1.")
+    if not 0 <= cfg.business.digest_weekday <= 6:
+        problems.append("business.digest_weekday должен быть в диапазоне 0..6 (0=Пн).")
+    if not 0 <= cfg.business.digest_hour_utc <= 23:
+        problems.append("business.digest_hour_utc должен быть в диапазоне 0..23.")
+    if cfg.business.retention_days < 1:
+        problems.append("business.retention_days должен быть >= 1.")
     return problems
 
 
@@ -253,6 +294,17 @@ def run_setup_wizard(cfg: AppConfig, path: Path = CONFIG_PATH) -> AppConfig:
         ",".join(cfg.network.proxy_list),
     )
     cfg.network.proxy_list = [p.strip() for p in proxies.split(",") if p.strip()]
+
+    biz = _ask(
+        "Логировать личные чаты через Telegram Business (да/нет)",
+        "да" if cfg.business.enabled else "нет",
+    ).lower()
+    cfg.business.enabled = biz in ("да", "yes", "y", "1", "true", "on")
+    if cfg.business.enabled:
+        print(
+            "  Не забудьте включить Business Mode у бота в @BotFather:\n"
+            "  /mybots → выберите бота → Bot Settings → Business Mode → Turn on."
+        )
 
     cfg.save(path)
     print(f"\nКонфигурация сохранена: {path}")

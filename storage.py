@@ -6,6 +6,11 @@ storage.py — SQLite-хранилище: кэш ответов, дневной 
   usage     — сколько запросов сделал пользователь за сутки (окно = календарные сутки UTC)
   history   — журнал запросов пользователя, нужен для /delete_me
   settings  — key/value для рантайм-настроек (например, смена провайдера через /setkey)
+  watches   — наблюдения за публичными реестрами (мониторинг)
+  snapshots — снимки состояния наблюдений для вычисления изменений
+  business_connections — подключения Telegram Business (владелец аккаунта)
+  chat_meta            — известные чаты подключения
+  chat_messages        — архив переписки, включая удалённые сообщения
 
 Всё хранится локально, во внешние сервисы ничего не отправляется.
 """
@@ -67,6 +72,55 @@ CREATE TABLE IF NOT EXISTS snapshots (
 );
 
 CREATE INDEX IF NOT EXISTS idx_snapshots_watch ON snapshots(watch_id, created_at DESC);
+
+-- ------------------------------------------------------------------ --
+-- Логирование личных чатов через Telegram Business.
+-- Владелец аккаунта сам подключает бота и сам выбирает, какие чаты ему
+-- открыть. Данные каждого подключения изолированы по connection_id и
+-- доступны только владельцу этого подключения.
+-- ------------------------------------------------------------------ --
+CREATE TABLE IF NOT EXISTS business_connections (
+    connection_id TEXT PRIMARY KEY,
+    owner_user_id INTEGER NOT NULL,
+    user_chat_id  INTEGER,
+    is_enabled    INTEGER NOT NULL DEFAULT 1,
+    connected_at  REAL    NOT NULL,
+    updated_at    REAL    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_biz_conn_owner ON business_connections(owner_user_id);
+
+CREATE TABLE IF NOT EXISTS chat_meta (
+    connection_id TEXT    NOT NULL,
+    chat_id       INTEGER NOT NULL,
+    title         TEXT    NOT NULL DEFAULT '',
+    chat_type     TEXT    NOT NULL DEFAULT '',
+    updated_at    REAL    NOT NULL,
+    PRIMARY KEY (connection_id, chat_id)
+);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    connection_id TEXT    NOT NULL,
+    chat_id       INTEGER NOT NULL,
+    message_id    INTEGER NOT NULL,
+    sender_id     INTEGER,
+    sender_name   TEXT    NOT NULL DEFAULT '',
+    outgoing      INTEGER NOT NULL DEFAULT 0,
+    content_type  TEXT    NOT NULL DEFAULT 'text',
+    text          TEXT    NOT NULL DEFAULT '',
+    sent_at       REAL    NOT NULL,
+    edited_at     REAL,
+    is_deleted    INTEGER NOT NULL DEFAULT 0,
+    deleted_at    REAL,
+    UNIQUE(connection_id, chat_id, message_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_messages_chat
+    ON chat_messages(connection_id, chat_id, sent_at DESC);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_deleted
+    ON chat_messages(connection_id, is_deleted, deleted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_sent ON chat_messages(sent_at);
 """
 
 
@@ -212,6 +266,37 @@ class Storage:
             or 0
         )
 
+        # Business-подключения пользователя: сообщения и метаданные чатов
+        # удаляются вместе с подключением.
+        conn_ids = [
+            row["connection_id"]
+            for row in self.conn.execute(
+                "SELECT connection_id FROM business_connections WHERE owner_user_id = ?",
+                (user_id,),
+            ).fetchall()
+        ]
+        biz_messages = 0
+        biz_chats = 0
+        for cid in conn_ids:
+            biz_messages += (
+                self.conn.execute(
+                    "DELETE FROM chat_messages WHERE connection_id = ?", (cid,)
+                ).rowcount
+                or 0
+            )
+            biz_chats += (
+                self.conn.execute(
+                    "DELETE FROM chat_meta WHERE connection_id = ?", (cid,)
+                ).rowcount
+                or 0
+            )
+        biz_connections = (
+            self.conn.execute(
+                "DELETE FROM business_connections WHERE owner_user_id = ?", (user_id,)
+            ).rowcount
+            or 0
+        )
+
         self.conn.commit()
         return {
             "history": h,
@@ -219,6 +304,9 @@ class Storage:
             "cache": c,
             "watches": w,
             "snapshots": snapshots,
+            "biz_connections": biz_connections,
+            "biz_messages": biz_messages,
+            "biz_chats": biz_chats,
         }
 
     # ------------------------------------------------------------------ #
@@ -312,3 +400,244 @@ class Storage:
         )
         self.conn.commit()
         return cur.rowcount or 0
+
+    # ------------------------------------------------------------------ #
+    # Telegram Business: подключения, чаты, сообщения
+    # ------------------------------------------------------------------ #
+    def biz_connection_upsert(
+        self,
+        connection_id: str,
+        owner_user_id: int,
+        user_chat_id: Optional[int],
+        is_enabled: bool,
+    ) -> None:
+        now = time.time()
+        self.conn.execute(
+            """
+            INSERT INTO business_connections
+                (connection_id, owner_user_id, user_chat_id, is_enabled, connected_at, updated_at)
+            VALUES(?, ?, ?, ?, ?, ?)
+            ON CONFLICT(connection_id) DO UPDATE SET
+                owner_user_id = excluded.owner_user_id,
+                user_chat_id  = excluded.user_chat_id,
+                is_enabled    = excluded.is_enabled,
+                updated_at    = excluded.updated_at
+            """,
+            (connection_id, owner_user_id, user_chat_id, int(is_enabled), now, now),
+        )
+        self.conn.commit()
+
+    def biz_connection_owner(self, connection_id: str) -> Optional[int]:
+        """Владелец подключения — единственный, кто получает его данные."""
+        row = self.conn.execute(
+            "SELECT owner_user_id FROM business_connections WHERE connection_id = ?",
+            (connection_id,),
+        ).fetchone()
+        return int(row["owner_user_id"]) if row else None
+
+    def biz_connection_enabled(self, connection_id: str) -> bool:
+        row = self.conn.execute(
+            "SELECT is_enabled FROM business_connections WHERE connection_id = ?",
+            (connection_id,),
+        ).fetchone()
+        return bool(row["is_enabled"]) if row else False
+
+    def biz_connection_set_enabled(self, connection_id: str, is_enabled: bool) -> None:
+        self.conn.execute(
+            "UPDATE business_connections SET is_enabled = ?, updated_at = ? WHERE connection_id = ?",
+            (int(is_enabled), time.time(), connection_id),
+        )
+        self.conn.commit()
+
+    def biz_connections_for(self, owner_user_id: int) -> List[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                "SELECT connection_id, user_chat_id, is_enabled, connected_at "
+                "FROM business_connections WHERE owner_user_id = ? ORDER BY connected_at DESC",
+                (owner_user_id,),
+            ).fetchall()
+        )
+
+    def biz_all_connections(self) -> List[sqlite3.Row]:
+        """Все активные подключения — для фоновой рассылки сводок."""
+        return list(
+            self.conn.execute(
+                "SELECT connection_id, owner_user_id, user_chat_id FROM business_connections "
+                "WHERE is_enabled = 1 ORDER BY owner_user_id"
+            ).fetchall()
+        )
+
+    def biz_chat_touch(
+        self, connection_id: str, chat_id: int, title: str, chat_type: str
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO chat_meta(connection_id, chat_id, title, chat_type, updated_at)
+            VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(connection_id, chat_id) DO UPDATE SET
+                title      = excluded.title,
+                chat_type  = excluded.chat_type,
+                updated_at = excluded.updated_at
+            """,
+            (connection_id, chat_id, title, chat_type, time.time()),
+        )
+        self.conn.commit()
+
+    def biz_message_store(
+        self,
+        connection_id: str,
+        chat_id: int,
+        message_id: int,
+        sender_id: Optional[int],
+        sender_name: str,
+        outgoing: bool,
+        content_type: str,
+        text: str,
+        sent_at: float,
+    ) -> None:
+        """
+        Сохраняет сообщение. Повторный апдейт (правка) обновляет текст и
+        время правки, но не сбрасывает отметку об удалении.
+        """
+        self.conn.execute(
+            """
+            INSERT INTO chat_messages
+                (connection_id, chat_id, message_id, sender_id, sender_name,
+                 outgoing, content_type, text, sent_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(connection_id, chat_id, message_id) DO UPDATE SET
+                text         = excluded.text,
+                content_type = excluded.content_type,
+                edited_at    = ?
+            """,
+            (
+                connection_id,
+                chat_id,
+                message_id,
+                sender_id,
+                sender_name,
+                int(outgoing),
+                content_type,
+                text,
+                sent_at,
+                time.time(),
+            ),
+        )
+        self.conn.commit()
+
+    def biz_message_get(
+        self, connection_id: str, chat_id: int, message_id: int
+    ) -> Optional[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT message_id, sender_id, sender_name, outgoing, content_type, text, sent_at "
+            "FROM chat_messages WHERE connection_id = ? AND chat_id = ? AND message_id = ?",
+            (connection_id, chat_id, message_id),
+        ).fetchone()
+
+    def biz_mark_deleted(
+        self, connection_id: str, chat_id: int, message_ids: List[int]
+    ) -> List[sqlite3.Row]:
+        """
+        Помечает сообщения удалёнными и возвращает их содержимое.
+
+        Именно этот метод даёт ответ на «что собеседник удалил»: текст
+        берётся из архива, который бот записал до удаления.
+        """
+        if not message_ids:
+            return []
+        placeholders = ",".join("?" for _ in message_ids)
+        rows = list(
+            self.conn.execute(
+                f"SELECT message_id, sender_id, sender_name, outgoing, content_type, text, sent_at "
+                f"FROM chat_messages WHERE connection_id = ? AND chat_id = ? "
+                f"AND message_id IN ({placeholders})",
+                (connection_id, chat_id, *message_ids),
+            ).fetchall()
+        )
+        now = time.time()
+        self.conn.execute(
+            f"UPDATE chat_messages SET is_deleted = 1, deleted_at = ? "
+            f"WHERE connection_id = ? AND chat_id = ? AND message_id IN ({placeholders})",
+            (now, connection_id, chat_id, *message_ids),
+        )
+        self.conn.commit()
+        return rows
+
+    def biz_chat_list(self, connection_id: str) -> List[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                """
+                SELECT m.chat_id,
+                       COALESCE(c.title, '') AS title,
+                       COALESCE(c.chat_type, '') AS chat_type,
+                       COUNT(*) AS total,
+                       SUM(CASE WHEN m.is_deleted = 1 THEN 1 ELSE 0 END) AS deleted,
+                       MAX(m.sent_at) AS last_at
+                FROM chat_messages m
+                LEFT JOIN chat_meta c
+                       ON c.connection_id = m.connection_id AND c.chat_id = m.chat_id
+                WHERE m.connection_id = ?
+                GROUP BY m.chat_id
+                ORDER BY last_at DESC
+                """,
+                (connection_id,),
+            ).fetchall()
+        )
+
+    def biz_messages_since(
+        self, connection_id: str, since: float, chat_id: Optional[int] = None
+    ) -> List[sqlite3.Row]:
+        sql = (
+            "SELECT chat_id, message_id, sender_id, sender_name, outgoing, content_type, "
+            "text, sent_at, is_deleted FROM chat_messages "
+            "WHERE connection_id = ? AND sent_at >= ?"
+        )
+        params: List[Any] = [connection_id, since]
+        if chat_id is not None:
+            sql += " AND chat_id = ?"
+            params.append(chat_id)
+        sql += " ORDER BY sent_at ASC"
+        return list(self.conn.execute(sql, tuple(params)).fetchall())
+
+    def biz_deleted_since(
+        self, connection_id: str, since: float
+    ) -> List[sqlite3.Row]:
+        return list(
+            self.conn.execute(
+                "SELECT chat_id, message_id, sender_name, outgoing, content_type, text, "
+                "sent_at, deleted_at FROM chat_messages "
+                "WHERE connection_id = ? AND is_deleted = 1 AND deleted_at >= ? "
+                "ORDER BY deleted_at ASC",
+                (connection_id, since),
+            ).fetchall()
+        )
+
+    def biz_stats(self, connection_id: str) -> Dict[str, int]:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS total, "
+            "SUM(CASE WHEN is_deleted = 1 THEN 1 ELSE 0 END) AS deleted, "
+            "COUNT(DISTINCT chat_id) AS chats "
+            "FROM chat_messages WHERE connection_id = ?",
+            (connection_id,),
+        ).fetchone()
+        return {
+            "total": int(row["total"] or 0),
+            "deleted": int(row["deleted"] or 0),
+            "chats": int(row["chats"] or 0),
+        }
+
+    def biz_prune(self, retention_days: int) -> int:
+        """
+        Удаляет переписку старше retention_days. Отдельно чистит метаданные
+        чатов, в которых не осталось сообщений.
+        """
+        cutoff = time.time() - retention_days * 86400
+        cur = self.conn.execute("DELETE FROM chat_messages WHERE sent_at < ?", (cutoff,))
+        removed = cur.rowcount or 0
+        self.conn.execute(
+            "DELETE FROM chat_meta WHERE NOT EXISTS ("
+            "SELECT 1 FROM chat_messages m WHERE m.connection_id = chat_meta.connection_id "
+            "AND m.chat_id = chat_meta.chat_id)"
+        )
+        self.conn.commit()
+        return removed

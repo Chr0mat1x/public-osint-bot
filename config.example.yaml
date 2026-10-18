@@ -32,6 +32,19 @@ monitor:
   interval_hours: 6          # как часто обходить наблюдения
   max_watches_per_user: 10   # сколько наблюдений может держать один пользователь
 
+business:
+  # Логирование личных чатов через Telegram Business.
+  # Пользователь сам подключает бота к своему аккаунту:
+  #   Настройки → Telegram Business → Чат-боты → выбрать бота.
+  # Бот видит ТОЛЬКО те чаты, которые владелец аккаунта ему открыл.
+  # Требует включённого Business Mode у бота в @BotFather.
+  enabled: true
+  notify_deletions: true     # писать владельцу, когда собеседник удалил сообщение
+  digest_enabled: true       # недельная сводка переписок
+  digest_weekday: 6          # 0=Пн … 6=Вс; 6 — воскресенье
+  digest_hour_utc: 20        # во сколько по UTC присылать сводку
+  retention_days: 30         # сколько дней хранить переписку, потом автоочистка
+
 network:
   # Опционально: список прокси, "http://user:pass@host:port" или "socks5://host:port"
   # (для socks5 нужен aiohttp-socks, см. README)
